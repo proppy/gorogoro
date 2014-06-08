@@ -1,3 +1,5 @@
+// gorogoro helps lazy gophers to run their programs in the cloud.
+// usage:   gorogoro [github.com/import/path]
 package main
 
 import (
@@ -500,7 +502,7 @@ func main() {
 		log.Fatalf("failed to create firewall: %v", err)
 	}
 	log.Println("firewall entry created for port:", port)
-	fmt.Println("container running:", ip+":"+port)
+	fmt.Println("go app running at:", ip+":"+port)
 }
 
 func ContextDirectory() (string, error) {
