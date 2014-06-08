@@ -16,6 +16,7 @@ import (
 	"code.google.com/p/go.crypto/ssh"
 	"code.google.com/p/goauth2/oauth"
 	compute "code.google.com/p/google-api-go-client/compute/v1"
+	"github.com/proppy/go-dockerclient"
 )
 
 var (
@@ -306,5 +307,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to create ssh tunnel to docker: %v", err)
 	}
-	fmt.Println(conn, err)
+	log.Println(conn)
+
+	docker, err := docker.NewClient("tcp://invalid-hostname:4243")
+	if err != nil {
+		log.Fatalf("failed to create docker client: %v", err)
+	}
+	docker.Client.Transport = &http.Transport{
+		Dial: func(proto string, addr string) (net.Conn, error) {
+			return conn, nil
+		},
+	}
+	log.Println(docker.Version())
 }
