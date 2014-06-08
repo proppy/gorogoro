@@ -462,7 +462,7 @@ func main() {
 	}
 	diskUrl, err := compute.Disk(*disk)
 	if err != nil {
-		log.Fatalf("failed to create root disk")
+		log.Fatalf("failed to create root disk", err)
 	}
 	log.Println("disk url:", diskUrl)
 	instanceUrl, err := compute.Instance(*name, diskUrl)
