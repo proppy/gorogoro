@@ -407,6 +407,9 @@ func (d *Docker) Run(name, image string) (string, error) {
 			Name: name,
 			Config: &docker.Config{
 				Image: image,
+				ExposedPorts: map[docker.Port]struct{}{
+					docker.Port(*port): struct{}{},
+				},
 			},
 		},
 	)
@@ -420,6 +423,7 @@ func (d *Docker) Run(name, image string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to inspect container %q: %v", c.ID, err)
 	}
+	log.Println("container started with ports:", c.NetworkSettings.Ports)
 	return c.NetworkSettings.Ports[docker.Port(*port)][0].HostPort, nil
 }
 
