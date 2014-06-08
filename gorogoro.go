@@ -1,9 +1,12 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net"
@@ -11,6 +14,7 @@ import (
 	"os"
 	"os/user"
 	"path"
+	"path/filepath"
 	"time"
 
 	"code.google.com/p/go.crypto/ssh"
@@ -53,7 +57,7 @@ type Credentials struct {
 func (c *Credentials) path() (string, error) {
 	usr, err := user.Current()
 	if err != nil {
-		return "", fmt.Errorf("enable to get current user")
+		return "", fmt.Errorf("failed to get current user")
 	}
 	return path.Join(usr.HomeDir, *cred), nil
 }
@@ -66,12 +70,12 @@ func (c *Credentials) Read() error {
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("unable to load credentials from %q: %v", path, err)
+		return fmt.Errorf("failed to load credentials from %q: %v", path, err)
 	}
 	defer f.Close()
 
 	if err := json.NewDecoder(f).Decode(c); err != nil {
-		return fmt.Errorf("enable to decode credentials: %v", err)
+		return fmt.Errorf("failed to decode credentials: %v", err)
 	}
 	if len(c.Data) == 0 {
 		return fmt.Errorf("no credentials in: %q", path)
@@ -249,7 +253,7 @@ func (k *Key) Read() error {
 func (k *Key) path() (string, error) {
 	usr, err := user.Current()
 	if err != nil {
-		return "", fmt.Errorf("enable to get current user")
+		return "", fmt.Errorf("failed to get current user")
 	}
 	return path.Join(usr.HomeDir, *identity), nil
 }
@@ -274,6 +278,67 @@ func (c *Compute) Tunnel(ip string, port int) (net.Conn, error) {
 	}
 	laddr := fmt.Sprintf("127.0.0.1:%d", port)
 	return conn.Dial("tcp", laddr)
+}
+
+type Docker struct {
+	*docker.Client
+}
+
+func NewDocker(conn net.Conn) (*Docker, error) {
+	docker, err := docker.NewClient("tcp://invalid-hostname:4243")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create docker client: %v", err)
+	}
+	docker.Client.Transport = &http.Transport{
+		Dial: func(proto string, addr string) (net.Conn, error) {
+			return conn, nil
+		},
+	}
+	return &Docker{docker}, nil
+}
+
+func NewContext(dockerfile, dir string) (io.Reader, error) {
+	var context bytes.Buffer
+	tr := tar.NewWriter(&context)
+	defer tr.Close()
+	tr.WriteHeader(&tar.Header{Name: "Dockerfile", Size: int64(len(dockerfile))})
+	tr.Write([]byte(dockerfile))
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return fmt.Errorf("failed to walk directory %q: %v", dir, err)
+		}
+		if info.IsDir() {
+			return nil
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return fmt.Errorf("failed to read file info header %q: %v", dir, err)
+		}
+		tr.WriteHeader(header)
+		f, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("failed to open %q: %v", path, err)
+		}
+		defer f.Close()
+		n, err := io.Copy(tr, f)
+		if err != nil {
+			return fmt.Errorf("failed to archive file %q: %v", path, err)
+		}
+		log.Printf("archived path %q (%d bytes)", path, n)
+		return nil
+	})
+	return &context, err
+}
+
+func (d *Docker) Build(image string, context io.Reader) (string, error) {
+	var output bytes.Buffer
+	log.Printf("building image: %q", image)
+	err := d.BuildImage(docker.BuildImageOptions{
+		Name:         image,
+		InputStream:  context,
+		OutputStream: &output,
+	})
+	return output.String(), err
 }
 
 func main() {
@@ -308,15 +373,31 @@ func main() {
 		log.Fatalf("failed to create ssh tunnel to docker: %v", err)
 	}
 	log.Println(conn)
-
-	docker, err := docker.NewClient("tcp://invalid-hostname:4243")
+	docker, err := NewDocker(conn)
 	if err != nil {
-		log.Fatalf("failed to create docker client: %v", err)
+		log.Fatalf("failed to connect docker to ssh tunnel: %v", err)
 	}
-	docker.Client.Transport = &http.Transport{
-		Dial: func(proto string, addr string) (net.Conn, error) {
-			return conn, nil
-		},
+	version, err := docker.Version()
+	if err != nil {
+		log.Fatalf("failed to send docker api call: %v", err)
 	}
-	log.Println(docker.Version())
+	log.Println("docker version:", version)
+	dir, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("failed to get current directory: %v", err)
+	}
+	ctx, err := NewContext("FROM google/golang-runtime", dir)
+	if err != nil {
+		log.Fatalf("failed to create context: %v", err)
+	}
+	usr, err := user.Current()
+	if err != nil {
+		log.Fatalf("failed to get current user: %v", err)
+	}
+	img := usr.Username + "/" + filepath.Base(dir)
+	out, err := docker.Build(img, ctx)
+	if err != nil {
+		log.Fatalf("failed to build docker image %q: %v; %s", img, err, out)
+	}
+	log.Println(out)
 }
