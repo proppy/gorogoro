@@ -1,5 +1,9 @@
 // gorogoro helps lazy gophers to run their programs in the cloud.
 // usage:   gorogoro [github.com/import/path]
+// TODO:
+// - attach stdout
+// - -entrypoint override
+// - target tag firewall
 package main
 
 import (
