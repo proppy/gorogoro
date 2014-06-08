@@ -372,6 +372,7 @@ func NewContext(dockerfile, dir string) (io.Reader, error) {
 		if err != nil {
 			return fmt.Errorf("failed to read file info header %q: %v", dir, err)
 		}
+		header.Name = path[len(dir):]
 		tr.WriteHeader(header)
 		f, err := os.Open(path)
 		if err != nil {
