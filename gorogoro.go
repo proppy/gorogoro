@@ -433,7 +433,7 @@ func main() {
 
 	dir, err := ContextDirectory()
 	if err != nil {
-		log.Printf("failed to get context directory: %v", err)
+		log.Printf("failed to infer context directory: %v", err)
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(-1)
 	}
@@ -549,7 +549,7 @@ func Dockerfile(dir string) (string, error) {
 	}
 	bs, err := ioutil.ReadAll(f)
 	if err != nil {
-		return "", fmt.Errorf("failed to read docker %q: %v", path, err)
+		return "", fmt.Errorf("failed to read dockerfile %q: %v", path, err)
 	}
 	return string(bs), nil
 }
