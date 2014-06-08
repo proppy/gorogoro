@@ -36,10 +36,14 @@ var (
 	port     = flag.String("port", "8080/tcp", "container local port")
 )
 
+const (
+	usage = "usage: gorogoro [go/pkg/path]"
+)
+
 var credentials Credentials
 var key Key
 
-// Credentials store gcloud credentials.
+// Credentials stores gcloud credentials.
 type Credentials struct {
 	Data []struct {
 		Credential struct {
@@ -188,6 +192,7 @@ func (c *Compute) Instance(name, disk string) (string, error) {
 	return op.TargetLink, nil
 }
 
+// WaitConnection waits until a connection a instance on a given port is successful.
 func (c *Compute) WaitConnection(name string, port int) (string, error) {
 	for {
 		instance, err := c.Instances.Get(c.Project, c.Zone, name).Do()
@@ -210,6 +215,7 @@ func (c *Compute) WaitConnection(name string, port int) (string, error) {
 	}
 }
 
+// wait waits for an zone operations to be DONE.
 func (c *Compute) wait(operation *compute.Operation) error {
 	for {
 		op, err := c.ZoneOperations.Get(c.Project, c.Zone, operation.Name).Do()
@@ -228,6 +234,7 @@ func (c *Compute) wait(operation *compute.Operation) error {
 	return nil
 }
 
+// waitGlobal waits for an zone operations to be DONE.
 func (c *Compute) waitGlobal(operation *compute.Operation) error {
 	for {
 		op, err := c.GlobalOperations.Get(c.Project, operation.Name).Do()
@@ -246,10 +253,12 @@ func (c *Compute) waitGlobal(operation *compute.Operation) error {
 	return nil
 }
 
+// Key is a type for a SSH private key.
 type Key struct {
 	ssh.Signer
 }
 
+// Read parses a private SSH key.
 func (k *Key) Read() error {
 	path, err := k.path()
 	if err != nil {
@@ -273,6 +282,7 @@ func (k *Key) Read() error {
 	return nil
 }
 
+// path returns the path to the gcloud SSH key.
 func (k *Key) path() (string, error) {
 	usr, err := user.Current()
 	if err != nil {
@@ -281,6 +291,7 @@ func (k *Key) path() (string, error) {
 	return path.Join(usr.HomeDir, *identity), nil
 }
 
+// Tunnel creates a SSH tunnel to a given IP and port.
 func (c *Compute) Tunnel(ip string, port int) (net.Conn, error) {
 	usr, err := user.Current()
 	if err != nil {
@@ -303,6 +314,7 @@ func (c *Compute) Tunnel(ip string, port int) (net.Conn, error) {
 	return conn.Dial("tcp", laddr)
 }
 
+// Firewall creates a firewall for a given port.
 func (c *Compute) Firewall(name, port string) error {
 	op, err := c.Firewalls.Insert(c.Project, &compute.Firewall{
 		Name:         name,
@@ -319,10 +331,12 @@ func (c *Compute) Firewall(name, port string) error {
 	return c.waitGlobal(op)
 }
 
+// Docker is a docker client.
 type Docker struct {
 	*docker.Client
 }
 
+// NewDocker returns a new docker client using the given net.Conn.
 func NewDocker(conn net.Conn) (*Docker, error) {
 	docker, err := docker.NewClient("tcp://invalid-hostname:4243")
 	if err != nil {
@@ -336,6 +350,7 @@ func NewDocker(conn net.Conn) (*Docker, error) {
 	return &Docker{docker}, nil
 }
 
+// NewContext returns a new docker build context w/ the given Dockerfile and directory.
 func NewContext(dockerfile, dir string) (io.Reader, error) {
 	var context bytes.Buffer
 	tr := tar.NewWriter(&context)
@@ -369,6 +384,7 @@ func NewContext(dockerfile, dir string) (io.Reader, error) {
 	return &context, err
 }
 
+// Build builds the given context into a docker image.
 func (d *Docker) Build(image string, context io.Reader) (string, error) {
 	var output bytes.Buffer
 	log.Printf("building image: %q", image)
@@ -380,6 +396,7 @@ func (d *Docker) Build(image string, context io.Reader) (string, error) {
 	return output.String(), err
 }
 
+// Run create and start a new container based on the given image.
 func (d *Docker) Run(name, image string) (string, error) {
 	c, err := d.CreateContainer(
 		docker.CreateContainerOptions{
@@ -403,6 +420,16 @@ func (d *Docker) Run(name, image string) (string, error) {
 }
 
 func main() {
+	flag.Parse()
+
+	dir, err := ContextDirectory()
+	if err != nil {
+		log.Printf("failed to get context directory: %v", err)
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(-1)
+	}
+	log.Println("context:", dir)
+
 	if err := credentials.Read(); err != nil {
 		log.Fatalf("failed to read credentials: %v", err)
 	}
@@ -443,10 +470,6 @@ func main() {
 		log.Fatalf("failed to send docker api call: %v", err)
 	}
 	log.Println("docker version:", version)
-	dir, err := os.Getwd()
-	if err != nil {
-		log.Fatalf("failed to get current directory: %v", err)
-	}
 	ctx, err := NewContext("FROM google/golang-runtime", dir)
 	if err != nil {
 		log.Fatalf("failed to create context: %v", err)
@@ -468,4 +491,30 @@ func main() {
 		log.Fatalf("failed to create firewall: %v", err)
 	}
 	log.Println("firewall entry created for port:", port)
+}
+
+func ContextDirectory() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current directory: %v", err)
+	}
+	if flag.NArg() == 0 {
+		return cwd, nil
+	}
+	paths := []string{
+		cwd,
+		os.Getenv("GOPATH"),
+	}
+	for _, p := range paths {
+		path := filepath.Join(p, filepath.Clean(flag.Arg(0)))
+		fi, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if !fi.IsDir() {
+			continue
+		}
+		return filepath.Abs(path)
+	}
+	return "", fmt.Errorf("no such directory %q", flag.Arg(0))
 }
