@@ -263,7 +263,7 @@ func (c *Compute) Tunnel(ip string, port int) (net.Conn, error) {
 	}
 	raddr := ip + ":22"
 	conn, err := ssh.Dial("tcp", ip+":22", &ssh.ClientConfig{
-		User: usr.Name,
+		User: usr.Username,
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(key),
 		},
