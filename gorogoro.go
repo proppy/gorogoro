@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/user"
 	"path"
 	"path/filepath"
@@ -34,6 +35,7 @@ var (
 	cred     = flag.String("cred", ".config/gcloud/credentials", "path to gcloud credentials")
 	identity = flag.String("identity", ".ssh/google_compute_engine", "path to gcloud ssh key")
 	port     = flag.String("port", "8080/tcp", "container local port")
+	from     = flag.String("from", "google/golang-runtime", "docker base image")
 )
 
 const (
@@ -430,6 +432,17 @@ func main() {
 	}
 	log.Println("context:", dir)
 
+	dockerfile, err := Dockerfile(dir)
+	if err != nil {
+		log.Printf("failed to infer Dockerfile: %v", err)
+	}
+	log.Println("dockerfile:", dockerfile)
+
+	context, err := NewContext(dockerfile, dir)
+	if err != nil {
+		log.Fatalf("failed to create context: %v", err)
+	}
+
 	if err := credentials.Read(); err != nil {
 		log.Fatalf("failed to read credentials: %v", err)
 	}
@@ -470,27 +483,24 @@ func main() {
 		log.Fatalf("failed to send docker api call: %v", err)
 	}
 	log.Println("docker version:", version)
-	ctx, err := NewContext("FROM google/golang-runtime", dir)
-	if err != nil {
-		log.Fatalf("failed to create context: %v", err)
-	}
 	usr, err := user.Current()
 	if err != nil {
 		log.Fatalf("failed to get current user: %v", err)
 	}
 	img := usr.Username + "/" + filepath.Base(dir)
-	out, err := docker.Build(img, ctx)
+	out, err := docker.Build(img, context)
 	if err != nil {
 		log.Fatalf("failed to build docker image %q: %v; %s", img, err, out)
 	}
 	log.Println("image built:", out)
 	ctr := fmt.Sprintf("%s-%d", *name, time.Now().Unix())
 	port, err := docker.Run(ctr, img)
-	log.Println("container run on:", ip+":"+port)
+	log.Println("container started on port:", port)
 	if err := compute.Firewall(ctr+"-firewall", port); err != nil {
 		log.Fatalf("failed to create firewall: %v", err)
 	}
 	log.Println("firewall entry created for port:", port)
+	fmt.Println("container running:", ip+":"+port)
 }
 
 func ContextDirectory() (string, error) {
@@ -501,12 +511,14 @@ func ContextDirectory() (string, error) {
 	if flag.NArg() == 0 {
 		return cwd, nil
 	}
+	pkg := flag.Arg(0)
+	gopath := filepath.Join(os.Getenv("GOPATH"), "src")
 	paths := []string{
 		cwd,
-		os.Getenv("GOPATH"),
+		gopath,
 	}
 	for _, p := range paths {
-		path := filepath.Join(p, filepath.Clean(flag.Arg(0)))
+		path := filepath.Join(p, filepath.Clean(pkg))
 		fi, err := os.Stat(path)
 		if err != nil {
 			continue
@@ -516,5 +528,21 @@ func ContextDirectory() (string, error) {
 		}
 		return filepath.Abs(path)
 	}
-	return "", fmt.Errorf("no such directory %q", flag.Arg(0))
+	if output, err := exec.Command("go", "get", pkg).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("no such go package %q: %v; %s", pkg, err, output)
+	}
+	return filepath.Join(gopath, pkg), nil
+}
+
+func Dockerfile(dir string) (string, error) {
+	path := filepath.Join(dir, "Dockerfile")
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Sprintf("FROM %s\n", *from), nil
+	}
+	bs, err := ioutil.ReadAll(f)
+	if err != nil {
+		return "", fmt.Errorf("failed to read docker %q: %v", path, err)
+	}
+	return string(bs), nil
 }
