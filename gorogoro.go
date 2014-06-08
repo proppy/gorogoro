@@ -2,8 +2,9 @@
 // usage:   gorogoro [github.com/import/path]
 // TODO:
 // - attach stdout
-// - -entrypoint override
 // - target tag firewall
+// - wait for exposed port connect
+// - reorder flags/cmd
 package main
 
 import (
@@ -31,17 +32,18 @@ import (
 )
 
 var (
-	project  = flag.String("project", "proppy-containers", "project")
-	zone     = flag.String("zone", "us-central1-a", "zone")
-	name     = flag.String("name", "gorogoro-vm", "vm name")
-	disk     = flag.String("disk", "gorogoro-disk", "disk name")
-	image    = flag.String("image", "https://www.googleapis.com/compute/v1/projects/google-containers/global/images/container-vm-v20140522", "vm image")
-	api      = flag.String("api", "https://www.googleapis.com/compute/v1", "api url")
-	machine  = flag.String("machine", "/zones/us-central1-a/machineTypes/f1-micro", "machine type")
-	cred     = flag.String("cred", ".config/gcloud/credentials", "path to gcloud credentials")
-	identity = flag.String("identity", ".ssh/google_compute_engine", "path to gcloud ssh key")
-	port     = flag.String("port", "8080/tcp", "container local port")
-	from     = flag.String("from", "google/golang-runtime", "docker base image")
+	project    = flag.String("project", "proppy-containers", "project")
+	zone       = flag.String("zone", "us-central1-a", "zone")
+	name       = flag.String("name", "gorogoro-vm", "vm name")
+	disk       = flag.String("disk", "gorogoro-disk", "disk name")
+	image      = flag.String("image", "https://www.googleapis.com/compute/v1/projects/google-containers/global/images/container-vm-v20140522", "vm image")
+	api        = flag.String("api", "https://www.googleapis.com/compute/v1", "api url")
+	machine    = flag.String("machine", "/zones/us-central1-a/machineTypes/f1-micro", "machine type")
+	cred       = flag.String("cred", ".config/gcloud/credentials", "path to gcloud credentials")
+	identity   = flag.String("identity", ".ssh/google_compute_engine", "path to gcloud ssh key")
+	port       = flag.String("port", "8080/tcp", "container local port")
+	from       = flag.String("from", "google/golang-runtime", "docker base image")
+	entrypoint = flag.String("entrypoint", "", "entrypoint override")
 )
 
 const (
@@ -405,8 +407,19 @@ func (d *Docker) Build(image string, context io.Reader) (string, error) {
 	return output.String(), err
 }
 
+// Command get Entrypoint and Cmd from command line arguments.
+func Command() ([]string, []string) {
+	cmd := flag.Args()[1:]
+	if *entrypoint != "" {
+		return []string{*entrypoint}, cmd
+	}
+	return nil, cmd
+}
+
 // Run create and start a new container based on the given image.
 func (d *Docker) Run(name, image string) (string, error) {
+	command, args := Command()
+	log.Println("running:", command, args)
 	c, err := d.CreateContainer(
 		docker.CreateContainerOptions{
 			Name: name,
@@ -415,6 +428,8 @@ func (d *Docker) Run(name, image string) (string, error) {
 				ExposedPorts: map[docker.Port]struct{}{
 					docker.Port(*port): struct{}{},
 				},
+				Entrypoint: command,
+				Cmd:        args,
 			},
 		},
 	)
@@ -427,6 +442,9 @@ func (d *Docker) Run(name, image string) (string, error) {
 	c, err = d.InspectContainer(c.ID)
 	if err != nil {
 		return "", fmt.Errorf("failed to inspect container %q: %v", c.ID, err)
+	}
+	if len(c.NetworkSettings.Ports) == 0 {
+		return "", nil
 	}
 	log.Println("container started with ports:", c.NetworkSettings.Ports)
 	return c.NetworkSettings.Ports[docker.Port(*port)][0].HostPort, nil
@@ -506,12 +524,14 @@ func main() {
 	log.Println("image built:", out)
 	ctr := fmt.Sprintf("%s-%d", *name, time.Now().Unix())
 	port, err := docker.Run(ctr, img)
-	log.Println("container started on port:", port)
-	if err := compute.Firewall(ctr+"-firewall", port); err != nil {
-		log.Fatalf("failed to create firewall: %v", err)
+	if port != "" {
+		log.Println("container started on port:", port)
+		if err := compute.Firewall(ctr+"-firewall", port); err != nil {
+			log.Fatalf("failed to create firewall: %v", err)
+		}
+		log.Println("firewall entry created for port:", port)
+		fmt.Println("go app running at:", ip+":"+port)
 	}
-	log.Println("firewall entry created for port:", port)
-	fmt.Println("go app running at:", ip+":"+port)
 }
 
 func ContextDirectory() (string, error) {
