@@ -33,6 +33,7 @@ var (
 	machine  = flag.String("machine", "/zones/us-central1-a/machineTypes/f1-micro", "machine type")
 	cred     = flag.String("cred", ".config/gcloud/credentials", "path to gcloud credentials")
 	identity = flag.String("identity", ".ssh/google_compute_engine", "path to gcloud ssh key")
+	port     = flag.String("port", "8080/tcp", "container local port")
 )
 
 var credentials Credentials
@@ -110,6 +111,7 @@ type Compute struct {
 	*compute.Service
 	Project string
 	Zone    string
+	Prefix  string
 }
 
 // NewCompute returns a new Compute service.
@@ -122,6 +124,7 @@ func NewCompute(client *http.Client) (*Compute, error) {
 		service,
 		*project,
 		*zone,
+		*api + "/projects/" + *project,
 	}, nil
 }
 
@@ -154,11 +157,10 @@ func (c *Compute) Instance(name, disk string) (string, error) {
 		return instance.SelfLink, nil
 	}
 	log.Printf("not found, creating new instance: %q", name)
-	prefix := *api + "/projects/" + c.Project
 	op, err := c.Instances.Insert(c.Project, c.Zone, &compute.Instance{
 		Name:        name,
 		Description: "gorogoro vm",
-		MachineType: prefix + *machine,
+		MachineType: c.Prefix + *machine,
 		Disks: []*compute.AttachedDisk{
 			{
 				Boot:   true,
@@ -172,7 +174,7 @@ func (c *Compute) Instance(name, disk string) (string, error) {
 				AccessConfigs: []*compute.AccessConfig{
 					&compute.AccessConfig{Type: "ONE_TO_ONE_NAT"},
 				},
-				Network: prefix + "/global/networks/default",
+				Network: c.Prefix + "/global/networks/default",
 			},
 		},
 	}).Do()
@@ -208,10 +210,31 @@ func (c *Compute) WaitConnection(name string, port int) (string, error) {
 	}
 }
 
-func (c *Compute) wait(op *compute.Operation) error {
+func (c *Compute) wait(operation *compute.Operation) error {
 	for {
-		op, err := c.ZoneOperations.Get(c.Project, c.Zone, op.Name).Do()
-		log.Printf("operation %q status: %s, %v", op.Name, op.Status, err)
+		op, err := c.ZoneOperations.Get(c.Project, c.Zone, operation.Name).Do()
+		if err != nil {
+			return fmt.Errorf("failed to get operation: %v", operation.Name, err)
+		}
+		log.Printf("operation %q status: %s", operation.Name, op.Status)
+		if op.Status == "DONE" {
+			if op.Error != nil {
+				return fmt.Errorf("operation error: %v", *op.Error.Errors[0])
+			}
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	return nil
+}
+
+func (c *Compute) waitGlobal(operation *compute.Operation) error {
+	for {
+		op, err := c.GlobalOperations.Get(c.Project, operation.Name).Do()
+		if err != nil {
+			return fmt.Errorf("failed to get operation: %v", operation.Name, err)
+		}
+		log.Printf("operation %q status: %s", operation.Name, op.Status)
 		if op.Status == "DONE" {
 			if op.Error != nil {
 				return fmt.Errorf("operation error: %v", *op.Error.Errors[0])
@@ -280,6 +303,22 @@ func (c *Compute) Tunnel(ip string, port int) (net.Conn, error) {
 	return conn.Dial("tcp", laddr)
 }
 
+func (c *Compute) Firewall(name, port string) error {
+	op, err := c.Firewalls.Insert(c.Project, &compute.Firewall{
+		Name:         name,
+		Network:      c.Prefix + "/global/networks/default",
+		SourceRanges: []string{"0.0.0.0/0"},
+		Allowed: []*compute.FirewallAllowed{&compute.FirewallAllowed{
+			IPProtocol: "tcp",
+			Ports:      []string{port},
+		}},
+	}).Do()
+	if err != nil {
+		return fmt.Errorf("insert firewall api called failed: %v", err)
+	}
+	return c.waitGlobal(op)
+}
+
 type Docker struct {
 	*docker.Client
 }
@@ -341,6 +380,28 @@ func (d *Docker) Build(image string, context io.Reader) (string, error) {
 	return output.String(), err
 }
 
+func (d *Docker) Run(name, image string) (string, error) {
+	c, err := d.CreateContainer(
+		docker.CreateContainerOptions{
+			Name: name,
+			Config: &docker.Config{
+				Image: image,
+			},
+		},
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to create container %q: %v", name, err)
+	}
+	if err := d.StartContainer(c.ID, &docker.HostConfig{PublishAllPorts: true}); err != nil {
+		return "", fmt.Errorf("failed to start container %q: %v", c.ID, err)
+	}
+	c, err = d.InspectContainer(c.ID)
+	if err != nil {
+		return "", fmt.Errorf("failed to inspect container %q: %v", c.ID, err)
+	}
+	return c.NetworkSettings.Ports[docker.Port(*port)][0].HostPort, nil
+}
+
 func main() {
 	if err := credentials.Read(); err != nil {
 		log.Fatalf("failed to read credentials: %v", err)
@@ -351,16 +412,16 @@ func main() {
 	}
 	compute, err := NewCompute(transport.Client())
 	if err != nil {
-		log.Fatalf("failed to create compute: %v", err)
+		log.Fatalf("failed to create compute client: %v", err)
 	}
 	diskUrl, err := compute.Disk(*disk)
 	if err != nil {
-		log.Fatalf("error creating root disk")
+		log.Fatalf("failed to create root disk")
 	}
 	log.Println("disk url:", diskUrl)
 	instanceUrl, err := compute.Instance(*name, diskUrl)
 	if err != nil {
-		log.Fatalf("error creating instance", err)
+		log.Fatalf("failed to create instance", err)
 	}
 	log.Println("instance url:", instanceUrl)
 	ip, err := compute.WaitConnection(*name, 22)
@@ -399,5 +460,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to build docker image %q: %v; %s", img, err, out)
 	}
-	log.Println(out)
+	log.Println("image built:", out)
+	ctr := fmt.Sprintf("%s-%d", *name, time.Now().Unix())
+	port, err := docker.Run(ctr, img)
+	log.Println("container run on:", ip+":"+port)
+	if err := compute.Firewall(ctr+"-firewall", port); err != nil {
+		log.Fatalf("failed to create firewall: %v", err)
+	}
+	log.Println("firewall entry created for port:", port)
 }
