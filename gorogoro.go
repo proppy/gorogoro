@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -12,21 +13,25 @@ import (
 	"path"
 	"time"
 
+	"code.google.com/p/go.crypto/ssh"
 	"code.google.com/p/goauth2/oauth"
 	compute "code.google.com/p/google-api-go-client/compute/v1"
 )
 
 var (
-	project = flag.String("project", "proppy-containers", "project")
-	zone    = flag.String("zone", "us-central1-a", "zone")
-	name    = flag.String("name", "gorogoro-vm", "vm name")
-	disk    = flag.String("disk", "gorogoro-disk", "disk name")
-	image   = flag.String("image", "https://www.googleapis.com/compute/v1/projects/google-containers/global/images/container-vm-v20140522", "vm image")
-	api     = flag.String("api", "https://www.googleapis.com/compute/v1", "api url")
-	machine = flag.String("machine", "/zones/us-central1-a/machineTypes/f1-micro", "machine type")
+	project  = flag.String("project", "proppy-containers", "project")
+	zone     = flag.String("zone", "us-central1-a", "zone")
+	name     = flag.String("name", "gorogoro-vm", "vm name")
+	disk     = flag.String("disk", "gorogoro-disk", "disk name")
+	image    = flag.String("image", "https://www.googleapis.com/compute/v1/projects/google-containers/global/images/container-vm-v20140522", "vm image")
+	api      = flag.String("api", "https://www.googleapis.com/compute/v1", "api url")
+	machine  = flag.String("machine", "/zones/us-central1-a/machineTypes/f1-micro", "machine type")
+	cred     = flag.String("cred", ".config/gcloud/credentials", "path to gcloud credentials")
+	identity = flag.String("identity", ".ssh/google_compute_engine", "path to gcloud ssh key")
 )
 
 var credentials Credentials
+var key Key
 
 // Credentials store gcloud credentials.
 type Credentials struct {
@@ -44,19 +49,19 @@ type Credentials struct {
 }
 
 // Path returns gcloud credentials path.
-func (c *Credentials) Path() (string, error) {
+func (c *Credentials) path() (string, error) {
 	usr, err := user.Current()
 	if err != nil {
 		return "", fmt.Errorf("enable to get current user")
 	}
-	return path.Join(usr.HomeDir, ".config/gcloud/credentials"), nil
+	return path.Join(usr.HomeDir, *cred), nil
 }
 
 // Read reads the credentials from disk.
 func (c *Credentials) Read() error {
-	path, err := c.Path()
+	path, err := c.path()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get credentials path: %v", err)
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -213,6 +218,63 @@ func (c *Compute) wait(op *compute.Operation) error {
 	return nil
 }
 
+type Key struct {
+	ssh.Signer
+}
+
+func (k *Key) Read() error {
+	path, err := k.path()
+	if err != nil {
+		return fmt.Errorf("failed to get ssh key path: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("unable to load ssh key from %q: %v", path, err)
+	}
+	defer f.Close()
+
+	bs, err := ioutil.ReadAll(f)
+	if err != nil {
+		return fmt.Errorf("failed to read ssh key: %v", err)
+	}
+	signer, err := ssh.ParsePrivateKey(bs)
+	if err != nil {
+		return fmt.Errorf("failed to parse ssh key: %v", err)
+	}
+	k.Signer = signer
+	return nil
+}
+
+func (k *Key) path() (string, error) {
+	usr, err := user.Current()
+	if err != nil {
+		return "", fmt.Errorf("enable to get current user")
+	}
+	return path.Join(usr.HomeDir, *identity), nil
+}
+
+func (c *Compute) Tunnel(ip string, port int) (net.Conn, error) {
+	usr, err := user.Current()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current user: %v", err)
+	}
+	if err := key.Read(); err != nil {
+		return nil, fmt.Errorf("failed to read ssh private key: %v", err)
+	}
+	raddr := ip + ":22"
+	conn, err := ssh.Dial("tcp", ip+":22", &ssh.ClientConfig{
+		User: usr.Name,
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(key),
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial ssh conn to %q: %v", raddr, err)
+	}
+	laddr := fmt.Sprintf("127.0.0.1:%d", port)
+	return conn.Dial("tcp", laddr)
+}
+
 func main() {
 	if err := credentials.Read(); err != nil {
 		log.Fatalf("failed to read credentials: %v", err)
@@ -229,15 +291,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("error creating root disk")
 	}
-	log.Println(diskUrl)
+	log.Println("disk url:", diskUrl)
 	instanceUrl, err := compute.Instance(*name, diskUrl)
 	if err != nil {
 		log.Fatalf("error creating instance", err)
 	}
-	log.Println(instanceUrl)
+	log.Println("instance url:", instanceUrl)
 	ip, err := compute.WaitConnection(*name, 22)
 	if err != nil {
 		log.Fatalf("failed to connect to instance ssh port: %v", err)
 	}
-	log.Println(ip)
+	log.Println("instance ip:", ip)
+	conn, err := compute.Tunnel(ip, 4243)
+	if err != nil {
+		log.Fatalf("failed to create ssh tunnel to docker: %v", err)
+	}
+	fmt.Println(conn, err)
 }
