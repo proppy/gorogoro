@@ -23,12 +23,13 @@ import (
 	"os/user"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"code.google.com/p/go.crypto/ssh"
 	"code.google.com/p/goauth2/oauth"
 	compute "code.google.com/p/google-api-go-client/compute/v1"
-	"github.com/proppy/go-dockerclient"
+	docker "github.com/proppy/go-dockerclient"
 )
 
 var (
@@ -41,8 +42,9 @@ var (
 	machine    = flag.String("machine", "/zones/us-central1-a/machineTypes/f1-micro", "machine type")
 	cred       = flag.String("cred", ".config/gcloud/credentials", "path to gcloud credentials")
 	identity   = flag.String("identity", ".ssh/google_compute_engine", "path to gcloud ssh key")
-	port       = flag.String("port", "8080/tcp", "container local port")
+	port       = flag.String("port", "", "container local port")
 	from       = flag.String("from", "google/golang-runtime", "docker base image")
+	dockerfile = flag.Bool("dockerfile", true, "use package Dockerfile")
 	entrypoint = flag.String("entrypoint", "", "entrypoint override")
 )
 
@@ -301,8 +303,11 @@ func (k *Key) path() (string, error) {
 	return path.Join(usr.HomeDir, *identity), nil
 }
 
+// Dialer is a ssh tunnel connection dialer.
+type Dialer func(string, string) (net.Conn, error)
+
 // Tunnel creates a SSH tunnel to a given IP and port.
-func (c *Compute) Tunnel(ip string, port int) (net.Conn, error) {
+func (c *Compute) Tunnel(ip string, port int) (Dialer, error) {
 	usr, err := user.Current()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current user: %v", err)
@@ -320,8 +325,16 @@ func (c *Compute) Tunnel(ip string, port int) (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial ssh conn to %q: %v", raddr, err)
 	}
-	laddr := fmt.Sprintf("127.0.0.1:%d", port)
-	return conn.Dial("tcp", laddr)
+	return func(net, addr string) (net.Conn, error) {
+		parts := strings.Split(addr, ":")
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("no port to connect to %q: %v", addr, parts)
+		}
+		port := parts[1]
+		log.Println("tunneling connection to port:", port)
+		laddr := fmt.Sprintf("127.0.0.1:%s", parts[1])
+		return conn.Dial("tcp", laddr)
+	}, nil
 }
 
 // Firewall creates a firewall for a given port.
@@ -347,17 +360,15 @@ type Docker struct {
 }
 
 // NewDocker returns a new docker client using the given net.Conn.
-func NewDocker(conn net.Conn) (*Docker, error) {
-	docker, err := docker.NewClient("tcp://invalid-hostname:4243")
+func NewDocker(dialer Dialer) (*Docker, error) {
+	dockerc, err := docker.NewClient("tcp://invalid-hostname:4243")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create docker client: %v", err)
 	}
-	docker.Client.Transport = &http.Transport{
-		Dial: func(proto string, addr string) (net.Conn, error) {
-			return conn, nil
-		},
+	dockerc.Client.Transport = &http.Transport{
+		Dial: dialer,
 	}
-	return &Docker{docker}, nil
+	return &Docker{dockerc}, nil
 }
 
 // NewContext returns a new docker build context w/ the given Dockerfile and directory.
@@ -372,6 +383,9 @@ func NewContext(dockerfile, dir string) (io.Reader, error) {
 			return fmt.Errorf("failed to walk directory %q: %v", dir, err)
 		}
 		if info.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(path, "Dockerfile") {
 			return nil
 		}
 		header, err := tar.FileInfoHeader(info, "")
@@ -407,47 +421,65 @@ func (d *Docker) Build(image string, context io.Reader) (string, error) {
 	return output.String(), err
 }
 
-// Command get Entrypoint and Cmd from command line arguments.
+// Command get Entrypoint and Cmd from command line args.
 func Command() ([]string, []string) {
-	cmd := flag.Args()[1:]
+	var cmd []string
+	if flag.NArg() > 1 {
+		cmd = flag.Args()[1:]
+	}
 	if *entrypoint != "" {
 		return []string{*entrypoint}, cmd
 	}
 	return nil, cmd
 }
 
+// Ports get exposed ports from command line args.
+func Ports() map[docker.Port]struct{} {
+	log.Println("port:", *port)
+	if *port != "" {
+		return map[docker.Port]struct{}{
+			docker.Port(*port): struct{}{},
+		}
+	}
+	return nil
+}
+
+// Ports get exposed ports from command line args.
+func PortBindings() map[docker.Port][]docker.PortBinding {
+	log.Println("port:", *port)
+	if *port != "" {
+		return map[docker.Port][]docker.PortBinding{
+			docker.Port(*port): []docker.PortBinding{},
+		}
+	}
+	return nil
+}
+
 // Run create and start a new container based on the given image.
-func (d *Docker) Run(name, image string) (string, error) {
+func (d *Docker) Run(name, image string) (*docker.Container, error) {
 	command, args := Command()
-	log.Println("running:", command, args)
+	ports := Ports()
+	log.Printf("running command: %v, args: %v, ports: %v", command, args, ports)
 	c, err := d.CreateContainer(
 		docker.CreateContainerOptions{
 			Name: name,
 			Config: &docker.Config{
-				Image: image,
-				ExposedPorts: map[docker.Port]struct{}{
-					docker.Port(*port): struct{}{},
-				},
-				Entrypoint: command,
-				Cmd:        args,
+				Image:        image,
+				ExposedPorts: ports,
+				Entrypoint:   command,
+				Cmd:          args,
 			},
 		},
 	)
 	if err != nil {
-		return "", fmt.Errorf("failed to create container %q: %v", name, err)
+		return nil, fmt.Errorf("failed to create container %q: %v", name, err)
 	}
-	if err := d.StartContainer(c.ID, &docker.HostConfig{PublishAllPorts: true}); err != nil {
-		return "", fmt.Errorf("failed to start container %q: %v", c.ID, err)
+	if err := d.StartContainer(c.ID, &docker.HostConfig{
+		PublishAllPorts: true,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to start container %q: %v", c.ID, err)
 	}
-	c, err = d.InspectContainer(c.ID)
-	if err != nil {
-		return "", fmt.Errorf("failed to inspect container %q: %v", c.ID, err)
-	}
-	if len(c.NetworkSettings.Ports) == 0 {
-		return "", nil
-	}
-	log.Println("container started with ports:", c.NetworkSettings.Ports)
-	return c.NetworkSettings.Ports[docker.Port(*port)][0].HostPort, nil
+	return d.InspectContainer(c.ID)
 }
 
 func main() {
@@ -498,16 +530,15 @@ func main() {
 		log.Fatalf("failed to connect to instance ssh port: %v", err)
 	}
 	log.Println("instance ip:", ip)
-	conn, err := compute.Tunnel(ip, 4243)
+	dialer, err := compute.Tunnel(ip, 4243)
 	if err != nil {
 		log.Fatalf("failed to create ssh tunnel to docker: %v", err)
 	}
-	log.Println(conn)
-	docker, err := NewDocker(conn)
+	dockerc, err := NewDocker(dialer)
 	if err != nil {
 		log.Fatalf("failed to connect docker to ssh tunnel: %v", err)
 	}
-	version, err := docker.Version()
+	version, err := dockerc.Version()
 	if err != nil {
 		log.Fatalf("failed to send docker api call: %v", err)
 	}
@@ -517,20 +548,28 @@ func main() {
 		log.Fatalf("failed to get current user: %v", err)
 	}
 	img := usr.Username + "/" + filepath.Base(dir)
-	out, err := docker.Build(img, context)
+	out, err := dockerc.Build(img, context)
 	if err != nil {
 		log.Fatalf("failed to build docker image %q: %v; %s", img, err, out)
 	}
 	log.Println("image built:", out)
-	ctr := fmt.Sprintf("%s-%d", *name, time.Now().Unix())
-	port, err := docker.Run(ctr, img)
-	if port != "" {
-		log.Println("container started on port:", port)
-		if err := compute.Firewall(ctr+"-firewall", port); err != nil {
-			log.Fatalf("failed to create firewall: %v", err)
+	cname := fmt.Sprintf("%s-%d", *name, time.Now().Unix())
+	container, err := dockerc.Run(cname, img)
+	if err != nil {
+		log.Fatalf("failed to run container %q: %v", cname, err)
+	}
+	if len(container.NetworkSettings.Ports) > 0 {
+		log.Println("container started with ports:", container.NetworkSettings.Ports)
+		for k, bindings := range container.NetworkSettings.Ports {
+			for _, p := range bindings {
+				log.Println("creating firewall entry for port:", p.HostPort)
+				if err := compute.Firewall(cname+"-"+strings.Replace(string(k), "/", "-", -1), p.HostPort); err != nil {
+					log.Fatalf("failed to create firewall: %v", err)
+				}
+				log.Println("firewall entry created for port:", k)
+				log.Printf("container port %s available running at: %s", k, ip+":"+p.HostPort)
+			}
 		}
-		log.Println("firewall entry created for port:", port)
-		fmt.Println("go app running at:", ip+":"+port)
 	}
 }
 
@@ -566,10 +605,13 @@ func ContextDirectory() (string, error) {
 }
 
 func Dockerfile(dir string) (string, error) {
+	if *dockerfile == false {
+		return fmt.Sprintf("FROM %s\n", *from), nil
+	}
 	path := filepath.Join(dir, "Dockerfile")
 	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Sprintf("FROM %s\n", *from), nil
+		return "", fmt.Errorf("no Dockerfile in package %q: %v", path, err)
 	}
 	bs, err := ioutil.ReadAll(f)
 	if err != nil {
