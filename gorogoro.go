@@ -207,6 +207,7 @@ func (c *Compute) Instance(name, disk string) (string, error) {
 // WaitConnection waits until a connection a instance on a given port is successful.
 func (c *Compute) WaitConnection(name string, port int) (string, error) {
 	for {
+		log.Printf("wait for connection to %q on port: %d", name, port)
 		instance, err := c.Instances.Get(c.Project, c.Zone, name).Do()
 		if err != nil {
 			return "", fmt.Errorf("could not find instance %q: %v", name, err)

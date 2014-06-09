@@ -12,7 +12,7 @@ go get github.com/proppy/gorogoro
 ## Usage
 
 ```
-gorogoro [github.com/import/path]
+gorogoro [-project google-cloud-project] [github.com/import/path]
 ```
 
 ## Examples
