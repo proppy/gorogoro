@@ -3,13 +3,13 @@ gorogoro
 
 gorogoro helps lazy gophers to run their programs in the cloud.
 
-# Usage
+## Usage
 
 ```
 gorogoro [github.com/import/path]
 ```
 
-# Example
+## Examples
 
 ```
 $ gorogoro path/to/go/pkg
@@ -26,7 +26,7 @@ cd some/go/pkg && gorogoro`
 2014/06/08 17:00:53 container port 8080/tcp available running at: 199.223.234.231:49162
 ```
 
-# How it works
+## How it works
 
 gorogoro:
 - reads gcloud credentials
@@ -36,7 +36,7 @@ gorogoro:
 - call docker run
 - create a firewall for the exposed port
 
-# TODO
+## TODO
 
 - attach stdout
 - target tag firewall
