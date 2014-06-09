@@ -44,7 +44,7 @@ var (
 	identity   = flag.String("identity", ".ssh/google_compute_engine", "path to gcloud ssh key")
 	port       = flag.String("port", "", "container local port")
 	from       = flag.String("from", "google/golang-runtime", "docker base image")
-	dockerfile = flag.Bool("dockerfile", true, "use package Dockerfile")
+	dockerfile = flag.Bool("dockerfile", false, "use package Dockerfile")
 	entrypoint = flag.String("entrypoint", "", "entrypoint override")
 )
 
