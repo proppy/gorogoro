@@ -3,6 +3,12 @@ gorogoro
 
 gorogoro helps lazy gophers to run their programs in the cloud.
 
+## Installation
+
+```
+go get github.com/proppy/gorogoro
+```
+
 ## Usage
 
 ```
