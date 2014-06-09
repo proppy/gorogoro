@@ -28,7 +28,7 @@ $ gorogoro -port 4001 github.com/coreos/etcd
 ```
 
 ```
-$ cd some/go/pkg && gorogoro`
+$ cd some/go/pkg && gorogoro
 2014/06/08 17:00:53 container port 8080/tcp available running at: 199.223.234.231:49162
 ```
 
