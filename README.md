@@ -18,17 +18,17 @@ gorogoro [github.com/import/path]
 ## Examples
 
 ```
-$ gorogoro path/to/go/pkg
+$ gorogoro example/
 2014/06/08 16:42:25 container port 8080/tcp available running at: 199.223.234.231:49156
 ```
 
 ```
-gorogoro -port 4001 github.com/coreos/etcd
+$ gorogoro -port 4001 github.com/coreos/etcd
 2014/06/08 16:42:19 container port 4001 available running at: 199.223.234.231:49155
 ```
 
 ```
-cd some/go/pkg && gorogoro`
+$ cd some/go/pkg && gorogoro`
 2014/06/08 17:00:53 container port 8080/tcp available running at: 199.223.234.231:49162
 ```
 
